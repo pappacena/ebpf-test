@@ -1,52 +1,56 @@
-from bcc import BPF
+import atexit
 import ctypes as ct
 import time
 import threading
 import socket
+import sys
 import os
 
-CONFIG_SOCKET_FILE = "/tmp/lg-drop-udp.sock"
+from bcc import BPF
+
+DEVICE = sys.argv[1]
+CONFIG_SOCKET_FILE = sys.argv[2]
+
 
 class Config(ct.Structure):
-  _fields_ = [("should_drop", ct.c_int)]
+    _fields_ = [
+        ("should_drop", ct.c_int),
+        ("source_port", ct.c_int)
+    ]
 
 
 def toggle_drop():
-  if os.path.exists(CONFIG_SOCKET_FILE):
-    os.unlink(CONFIG_SOCKET_FILE)
-  server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-  server.bind(CONFIG_SOCKET_FILE)
-  zero = ct.c_int(0)
-  while True:
-    server.listen(1)
-    conn, addr = server.accept()
-    datagram = conn.recv(1024)
-    new_value = int(datagram)
-    try:
-      current = config[zero].should_drop
-    except KeyError:
-      current = zero
-    cfg = Config(should_drop=new_value)
-    print(f"Received new packet drop config: {new_value} (used to be {current})")
-    config[zero] = cfg
-    time.sleep(0.5)
+    if os.path.exists(CONFIG_SOCKET_FILE):
+        os.unlink(CONFIG_SOCKET_FILE)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(CONFIG_SOCKET_FILE)
+    zero = ct.c_int(0)
+    while True:
+        server.listen(1)
+        conn, addr = server.accept()
+        datagram = conn.recv(1024)
+        print(datagram)
+        should_drop, source_port = datagram.split()
+        source_port = int(source_port)
+        should_drop = int(should_drop)
+        cfg = Config(should_drop=should_drop, source_port=source_port)
+        print(f"Received new packet drop config: {should_drop} / {source_port}")
+        config[zero] = cfg
 
 
 b = BPF(src_file="filter.c")
 config = b["config"]
 
-t = threading.Thread(target=toggle_drop)
-t.start()
+threading.Thread(target=toggle_drop, daemon=True).start()
 
-device = "lo"
 fn = b.load_func("udpfilter", BPF.XDP)
 
 
-b.attach_xdp(device, fn, 0)
+b.attach_xdp(DEVICE, fn, 0)
 
 try:
-  b.trace_print()
+    b.trace_print()
 except KeyboardInterrupt:
-  pass
+    pass
 
-b.remove_xdp(device, 0)
+atexit.register(lambda: b.remove_xdp(DEVICE, 0))
